@@ -1,4 +1,5 @@
 from code import InteractiveInterpreter
+import collections
 import functools
 import operator
 import pygame as pg
@@ -13,7 +14,13 @@ class config(object):
     ACCELERATION = .02
     MAX_VELOCITY = .5
 
+    SPRITE_WIDTH = 8
+    SPRITE_HEIGHT = 16
+
     DEFAULT_FONT_SIZE = 32
+    DEFAULT_FRAME_DELAY = 250
+
+    MIN_FRAME_DELAY = 25
 
 
 class Font(object):
@@ -46,6 +53,9 @@ class Font(object):
         return self._font.render(text, antialias, color)
 
 
+def alpha_surface(width, height):
+    return pg.Surface((width, height), flags=pg.SRCALPHA)
+
 def slice_image(source, width, height=None, postprocessor=None):
     if height is None:
         height = source.get_height()
@@ -60,6 +70,20 @@ def slice_image(source, width, height=None, postprocessor=None):
 
             yield image
 
+def image_rows(source, height):
+    width = source.get_width()
+    for y in range(0, source.get_height(), height):
+        dest = alpha_surface(width, height)
+        dest.blit(source, (0,0), pg.Rect(0,y,width,height))
+        yield dest
+
+def image_cols(source, width):
+    height = source.get_height()
+    for x in range(0, source.get_width(), width):
+        dest = alpha_surface(width, height)
+        dest.blit(source, (0, 0), pg.Rect(x,0,width,height))
+        yield dest
+
 def scalegetter(scale):
     def f(image):
         xer = functools.partial(operator.mul, scale)
@@ -72,14 +96,62 @@ def load(path, postprocessor=None):
         image = postprocessor(image)
     return image
 
+def flip_x(image):
+    return pg.transform.flip(image, True, False)
+
+def flip_x_anim(a):
+    return Animation([flip_x(image) for image in a.images])
+
+def player_frame_postprocesser(image):
+    scaler = scalegetter(4)
+    return scaler(image)
+
+def player_running_animations():
+    sheet = load('img/player-run.png')
+
+    keys = ['run-%s' % key for key in 'up up-right right down-right down'.split()]
+    anims = {}
+
+    width, height = config.SPRITE_WIDTH, config.SPRITE_HEIGHT
+
+    scaler = scalegetter(4)
+
+    for key, y in zip(keys, range(0, sheet.get_height(), height)):
+        frames = []
+        for x in range(0, sheet.get_width(), width):
+            frame = pg.Surface((width, height), flags=pg.SRCALPHA)
+            frame.blit(sheet, (0,0), pg.Rect(x,y,width,height))
+            frames.append(player_frame_postprocesser(frame))
+        anims[key] = Animation(frames)
+
+    anims['run-up-left'] = flip_x_anim(anims['run-up-right'])
+    anims['run-left'] = flip_x_anim(anims['run-right'])
+    anims['run-down-left'] = flip_x_anim(anims['run-down-right'])
+
+    return anims
+
+def player_stance_animations():
+    sheet = load('img/player-stance.png')
+
+    images = list(map(player_frame_postprocesser, image_rows(sheet, config.SPRITE_HEIGHT)))
+
+    anims = {'stance-down': Animation([images[0]]),
+             'stance-up': Animation([images[1]])}
+    return anims
+
+def player_animations():
+    anims = player_running_animations()
+    anims.update(player_stance_animations())
+    return anims
+
 class Animation(object):
 
-    def __init__(self, images, delay=250):
-        if not isinstance(images, list):
-            images = [images]
+    def __init__(self, images, delay=None):
         self.images = images
         self.timer = 0
         self.index = 0
+        if delay is None:
+            delay = config.DEFAULT_FRAME_DELAY
         self.delay = delay
 
     @property
@@ -288,15 +360,16 @@ class World(object):
             if callable(obj):
                 messages.append(obj())
 
-        y = 0
-        for msg in messages:
-            image = debugfont.render(msg)
-            rect = image.get_rect()
-            rect.right = screen_rect.right - 10
-            rect.y = y
+        if self.debug:
+            y = 0
+            for msg in messages:
+                image = debugfont.render(msg)
+                rect = image.get_rect()
+                rect.right = screen_rect.right - 10
+                rect.y = y
 
-            surface.blit(image, rect)
-            y += rect.height
+                surface.blit(image, rect)
+                y += rect.height
 
     def update(self, *args):
         for sprite in self.sprites:
@@ -317,9 +390,9 @@ class FramerateSprite(pg.sprite.Sprite):
 
     @property
     def image(self):
-        framerate = self.clock.get_fps()
+        framerate = '{:.2f}'.format(self.clock.get_fps())
         if not framerate in self._images:
-            self._images[framerate] = self._font.render(str(framerate))
+            self._images[framerate] = self._font.render(framerate)
         return self._images[framerate]
 
 
@@ -390,17 +463,15 @@ class Player(pg.sprite.Sprite):
         self.ax = 0
         self.ay = 0
 
+        self.lx = self.px
+        self.ly = self.py
+
         self.layer = 1
 
         self.limit = None
 
-        self.animation = 'running'
-        self.animations = {
-            'standing': Animation(load('img/standing.png', postprocessor=scalegetter(4))),
-            'running': Animation(list(slice_image(pg.image.load('img/running.png').convert_alpha(),
-                                                  14, postprocessor=scalegetter(4))),
-                                 delay=100)
-        }
+        self.animation = 'stance-up'
+        self.animations = player_animations()
 
         self.rect = self.animations[self.animation].image.get_rect()
 
@@ -418,6 +489,45 @@ class Player(pg.sprite.Sprite):
             self.ax = -config.ACCELERATION
         if keystate[pg.K_RIGHT]:
             self.ax = config.ACCELERATION
+
+    def update_limit(self):
+        if self.limit:
+            if not self.limit.contains(self.rect):
+                if self.rect.left < self.limit.left or self.rect.right > self.limit.right:
+                    self.vx = 0
+                if self.rect.top < self.limit.top or self.rect.bottom > self.limit.bottom:
+                    self.vy = 0
+                self.rect.clamp_ip(self.limit)
+                self.px = self.rect.x
+                self.py = self.rect.y
+
+    def update_animation(self, dt):
+        delay = config.DEFAULT_FRAME_DELAY
+        if self.vx == 0 and self.vy == 0:
+            self.animation = 'stance-up'
+        else:
+            tokens = ['run']
+
+            if self.vy != 0:
+                tokens.append('up' if self.vy < 0 else 'down')
+            if self.vx != 0:
+                tokens.append('left' if self.vx < 0 else 'right')
+
+            self.animation = '-'.join(tokens)
+
+            v = max(map(abs, (self.vx, self.vy)))
+            r = 1 - (v / config.MAX_VELOCITY)
+            if r > 0:
+                delay *= r
+            else:
+                delay = 0
+
+            if delay < config.MIN_FRAME_DELAY:
+                delay = config.MIN_FRAME_DELAY
+
+        self.animations[self.animation].delay = delay
+
+        self.animations[self.animation].update(dt)
 
     def update(self, dt):
 
@@ -453,32 +563,16 @@ class Player(pg.sprite.Sprite):
             self.vy = 0
             self.ay = 0
 
+        self.lx = self.px
+        self.ly = self.py
+
         self.px += self.vx * dt
         self.py += self.vy * dt
 
         self.rect.topleft = (self.px, self.py)
 
-        if self.limit:
-            if not self.limit.contains(self.rect):
-                if self.rect.left < self.limit.left or self.rect.right > self.limit.right:
-                    self.vx = 0
-                if self.rect.top < self.limit.top or self.rect.bottom > self.limit.bottom:
-                    self.vy = 0
-                self.rect.clamp_ip(self.limit)
-                self.px = self.rect.x
-                self.py = self.rect.y
-
-        if self.vx != 0 or self.vy != 0:
-            self.animation = 'running'
-
-            v = max(map(abs, (self.vx, self.vy)))
-            r = config.MAX_VELOCITY / v
-
-            self.animations[self.animation].delay = 50 * r
-        else:
-            self.animation = 'standing'
-
-        self.animations[self.animation].update(dt)
+        self.update_limit()
+        self.update_animation(dt)
 
     def render(self, screen):
         screen.blit(self.image, (self.px, self.py))
@@ -506,16 +600,16 @@ def main():
 
     world.add(player, framerate, footballfield, namesprite)
 
-    world.debug.append(player)
-    world.debug.append(world.camera)
-    world.debug.append(world.camera.focus)
-    world.debug.append(player.rect)
+    debug_boxes = [player, world.camera, world.camera.focus, player.rect]
 
-    world.debug.append(lambda: 'player.ax: {:.2f}'.format(player.ax, ))
-    world.debug.append(lambda: 'player.ay: {:.2f}'.format(player.ay, ))
-    world.debug.append(lambda: 'player.vx: {:.2f}'.format(player.vx, ))
-    world.debug.append(lambda: 'player.vy: {:.2f}'.format(player.vy, ))
-    world.debug.append(lambda: 'player.limit: %s' % (player.limit, ))
+    debug_player = [
+        lambda: 'ax: {:03.2f}'.format(player.ax, ),
+        lambda: 'ay: {:03.2f}'.format(player.ay, ),
+        lambda: 'vx: {:03.2f}'.format(player.vx, ),
+        lambda: 'vy: {:03.2f}'.format(player.vy, ),
+        lambda: 'limit: %s' % (player.limit, ),
+        lambda: 'anim.delay: {:03.0f}'.format(player.animations[player.animation].delay, ),
+    ]
 
     configeditor = ConfigEditor()
 
@@ -535,9 +629,9 @@ def main():
             if event.type == pg.QUIT:
                 done = True
 
-            rv = hasattr(context, 'handle') and context.handle(event)
+            other_handled = hasattr(context, 'handle') and context.handle(event)
 
-            if not rv and event.type == pg.KEYDOWN:
+            if not other_handled and event.type == pg.KEYDOWN:
                 if event.key == pg.K_ESCAPE:
                     if context is world:
                         done = True
@@ -549,6 +643,13 @@ def main():
                         context = configeditor
                     elif context is configeditor:
                         context = world
+                elif event.unicode == '?':
+                    if world.debug:
+                        world.debug.clear()
+                    else:
+                        world.debug.extend(debug_boxes)
+                        world.debug.extend(debug_player)
+
 
         #logic phase
         #world.clear(screen, background)
