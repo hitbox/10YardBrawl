@@ -713,8 +713,8 @@ def frames(image):
 # NOTES: Trying to work out a way to automatically deal with the irregullarly
 #        sized frames inside some of the sprite sheets.
 #        Detect transparent pixels
-#          Find the transparent box and determine that frame's size and the others
-#          
+#          Find the transparent box and determine that frame's size and the others.
+#        Make the frames the same size as the biggest frame and crop the transparencies.
 
 def main():
     pg.init()
