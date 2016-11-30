@@ -1,0 +1,24 @@
+10 Yard Fight
+
+Ball carrier doesn't animate top half
+Both arms up for half time
+Celebrate on touchdown and interception
+Can't pause during defense button prompt
+
+Helmet face for jumping celebration?
+
+There's a stand up frame after tackling dive
+That weird up-scrummage sprite has solid pixels for a reason--so the down-scrummage sprite can sit right on top.
+
+Animations/Spritesheet
+
+    What to do about ref-first-down-left?
+        The slicer/framer thinks it should be 16x32 and sliced.
+
+    TODO:
+        left/right flipper
+
+
+
+BTW:
+    Kinda liking always running from inside pdb
