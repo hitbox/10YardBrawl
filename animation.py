@@ -1,12 +1,13 @@
-from code import InteractiveInterpreter
-import os
-from itertools import groupby, cycle
 import collections
 import functools
 import operator
+import os
 import pygame as pg
+import sqlite3
 import string
 import time
+
+from itertools import groupby, cycle, chain, tee
 
 from pprint import pprint as pp
 
@@ -61,22 +62,190 @@ class Font(object):
         return self._font.render(text, antialias, color)
 
 
+class TextSprite(pg.sprite.Sprite):
+
+    def __init__(self, text):
+        self.image = Font().render(text)
+        self.rect = self.image.get_rect()
+
+
+class DataSprite(pg.sprite.Sprite):
+
+    def __init__(self, image=None, **data):
+        super(DataSprite, self).__init__()
+
+        if image is not None:
+            self.image = image
+            self.rect = image.get_rect()
+
+        for key, value in data.items():
+            setattr(self, key, value)
+
+
+class Context(object):
+
+    def __init__(self):
+        pg.init()
+        self.screen = pg.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
+        self.framerate = 60
+        self.clock = pg.time.Clock()
+        self.sprites = []
+
+    def add(self, *sprites):
+        self.sprites.extend(sprites)
+
+    def draw(self, dest):
+        for sprite in self.sprites:
+            try:
+                image, rect = sprite.image, sprite.rect
+            except AttributeError:
+                sprite.draw(dest)
+            else:
+                dest.blit(image, rect)
+
+    def handle(self, event):
+        pass
+
+    def main(self):
+        running = True
+        while running:
+            dt = self.clock.tick(self.framerate)
+
+            for event in pg.event.get():
+                if event.type == pg.QUIT:
+                    running = False
+                else:
+                    self.handle(event)
+
+            self.update(dt)
+
+            self.screen.fill((0,0,0))
+            self.draw(self.screen)
+
+            pg.display.flip()
+
+    def post(self, event_type):
+        pg.event.post(pg.event.Event(event_type))
+
+    def update(self, *args):
+        for sprite in self.sprites:
+            sprite.update(*args)
+
+
+def rendertext(text, **kwargs):
+    return Font(**kwargs).render(text)
+
+class PathSprite(pg.sprite.Sprite):
+
+    def __init__(self, path=None, showfull=False):
+        super(PathSprite, self).__init__()
+
+        if path is None:
+            path = os.path.abspath(os.path.dirname(__file__))
+        self.path = path
+
+        self.showfull = showfull
+
+        self.image = rendertext(self.path)
+        self.rect = self.image.get_rect()
+
+    def parent(self):
+        self.path = os.path.dirname(self.path)
+        return self
+
+    def join(self, path):
+        self.path = os.path.join(self.path, path)
+        return self
+
+    def listing(self):
+        def keyfunc(item):
+            return int(os.path.isdir(item))
+        items = (os.path.join(self.path, item) for item in os.listdir(self.path))
+        return sorted(items, key=keyfunc, reverse=True)
+
+    def update(self, *args):
+        text = self.path if self.showfull else os.path.basename(self.path)
+        self.image = rendertext(text,
+                                color=(75,75,255) if os.path.isdir(os.path.abspath(self.path)) else (255,255,255))
+        if self.rect is None:
+            self.rect = self.image.get_rect()
+        else:
+            self.rect.size = self.image.get_size()
+
+
+class SelectDir(Context):
+
+    def __init__(self):
+        super(SelectDir, self).__init__()
+
+        self.currentdirectory = PathSprite(showfull=True)
+        self.selected = None
+
+        self.refresh()
+
+    def refresh(self):
+        self.sprites = [PathSprite(item) for item in self.currentdirectory.listing()]
+
+        if self.sprites:
+            self.selected = self.sprites[0]
+            self.selected.rect.topleft = self.currentdirectory.rect.bottomleft
+
+            stack(self.sprites)
+        else:
+            self.selected = None
+
+    def handle(self, event):
+        if event.type == pg.KEYDOWN:
+            if event.key == pg.K_ESCAPE:
+                self.post(pg.QUIT)
+            elif event.key in (pg.K_UP, pg.K_DOWN):
+                if self.selected:
+                    x = -1 if event.key == pg.K_UP else 1
+                    i = (self.sprites.index(self.selected) + x) % len(self.sprites)
+                    while True:
+                        if self.sprites[i] is not self.currentdirectory:
+                            break
+                        i = (i + x) % len(self.sprites)
+                    self.selected = self.sprites[i]
+            elif event.key == pg.K_BACKSPACE:
+                self.currentdirectory.parent()
+                self.refresh()
+            elif event.key == pg.K_RETURN:
+                if self.selected and os.path.isdir(self.selected.path):
+                    self.currentdirectory.join(self.selected.path)
+                    self.refresh()
+
+    def draw(self, dest):
+        if self.selected:
+            pg.draw.rect(dest,(255,0,0),self.selected.rect.inflate(12,2), 1)
+        dest.blit(self.currentdirectory.image, self.currentdirectory.rect)
+        super(SelectDir, self).draw(dest)
+
+    def update(self, *args):
+        super(SelectDir, self).update(*args)
+        self.currentdirectory.update(*args)
+
+
+def pairwise(iterable):
+    a, b = tee(iterable)
+    next(b, None)
+    return zip(a, b)
+
+def stack(sprites, onattr='left'):
+    topattr, bottomattr = {
+            'left': ('bottomleft', 'topleft'),
+            'right': ('bottomright', 'topright')}[onattr]
+    for s1, s2 in pairwise(sprites):
+        setattr(s2.rect, bottomattr, getattr(s1.rect, topattr))
+
+def hasattrs(obj, *attrs):
+    return any(hasattr(atter) for attr in attrs)
+
+def hasallattrs(obj, *attrs):
+    return all(hasattr(atter) for attr in attrs)
+
 def alpha_surface(width, height):
     return pg.Surface((width, height), flags=pg.SRCALPHA)
-
-def slice_image(source, width, height=None, postprocessor=None):
-    if height is None:
-        height = source.get_height()
-
-    for y in range(0, source.get_height(), height):
-        for x in range(0, source.get_width(), width):
-            image = pg.Surface((width, height), flags=pg.SRCALPHA)
-            image.blit(source, (0, 0), pg.Rect(x, y, width, height))
-
-            if callable(postprocessor):
-                image = postprocessor(image)
-
-            yield image
 
 def image_rows(source, height):
     width = source.get_width()
@@ -102,6 +271,20 @@ scale4x = scalegetter(4)
 scale10x = scalegetter(10)
 scale15x = scalegetter(15)
 
+def slice_image(source, width, height=None, postprocessor=None):
+    if height is None:
+        height = source.get_height()
+
+    for y in range(0, source.get_height(), height):
+        for x in range(0, source.get_width(), width):
+            image = pg.Surface((width, height), flags=pg.SRCALPHA)
+            image.blit(source, (0, 0), pg.Rect(x, y, width, height))
+
+            if callable(postprocessor):
+                image = postprocessor(image)
+
+            yield image
+
 def load(path, postprocessor=None):
     image = pg.image.load(path).convert_alpha()
     if callable(postprocessor):
@@ -113,13 +296,6 @@ def flip_x(image):
 
 def flip_x_anim(a):
     return Animation([flip_x(image) for image in a.images])
-
-class SimpleTextSprite(pg.sprite.Sprite):
-
-    def __init__(self, text):
-        self.image = Font().render(text)
-        self.rect = self.image.get_rect()
-
 
 def pngs():
     "generator to return all the png paths"
@@ -169,65 +345,64 @@ def colors(image):
         for y in range(image.get_height()):
             yield ((x,y), image.get_at((x,y)))
 
-def frames_debug_transparency(image):
-    for coord, color in colors(image):
-        alpha = color[3]
-        if alpha == 0:
-            print(image)
-            break
+def hastransparent(image):
+    return any(color[3] == 0 for coord, color in colors(image))
 
 def frames(images):
     return cycle(map(scale10x, slice_image(image, 16, image.get_height())))
 
-class ClickSprite(pg.sprite.Sprite):
+def get_animations():
+    anims = {}
 
-    def __init__(self, image, **data):
-        super(ClickSprite, self).__init__()
-        self.image = image
-        self.rect = image.get_rect()
+    for shortkey, grouper in grouped_sprite_sheets():
+        images = tuple(load(os.path.join(dirpath, fn)) for dirpath, fn, _ in grouper)
 
-        for key, value in data.items():
-            setattr(self, key, value)
+        if len(images) == 3 and any(s in shortkey for s in ('run', 'calling')):
+            images += (images[1], )
 
+        if len(images) == 1 and not hastransparent(images[0]):
+            images = (image for image in slice_image(images[0], 16))
+
+        #TODO: left/right flipper
+        anims['-'.join(shortkey)] = cycle(scale10x(image) for image in images)
+
+    return anims
 
 def main():
+    filebrowser = SelectDir()
+    filebrowser.main()
+    pg.quit()
+
+def main2():
     pg.init()
 
     screen = pg.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
     screenrect = screen.get_rect()
 
-    d = {}
-
-    for shortkey, grouper in grouped_sprite_sheets():
-        groups = list(grouper)
-
-        images = (load(os.path.join(dirpath, fn)) for dirpath, fn, _ in groups)
-
-        _, _, fullkey = groups[0]
-        if not isint(fullkey[-1]):
-            # should be only one simple sheet that can be split into sprites.
-            #TODO: * left/right flipper
-            #      * fix ref-first-down-left
-            images = (image for image in slice_image(next(images), 16))
-
-        d['-'.join(shortkey)] = cycle(scale15x(image) for image in images)
+    anims = get_animations()
 
     f = Font(size=20).render
-    clicksprites = [ClickSprite(f(name), name=name) for name in sorted(d)]
+    datasprites = [DataSprite(f(name), name=name) for name in sorted(anims)]
 
-    active = clicksprites[0]
+    active = datasprites[0]
 
-    y = clicksprites[0].rect.bottom
-    for clicksprite in clicksprites[1:]:
-        clicksprite.rect.y = y
-        y = clicksprite.rect.bottom
+    for datasprite in datasprites:
+        datasprite.rect.x += 8
+
+    y = datasprites[0].rect.bottom
+    for datasprite in datasprites[1:]:
+        datasprite.rect.y = y
+        y = datasprite.rect.bottom
 
     index = 0
-    images = d[active.name]
+    images = anims[active.name]
     image = next(images)
 
-    helpsprite = SimpleTextSprite('n/N select animation')
+    helpsprite = TextSprite('UP/DOWN Select Animation')
     helpsprite.rect.topright = screen.get_rect().topright
+
+    delaysprite = DataSprite(Font().render('a/z delay'), delay=250)
+    delaysprite.rect.topright = helpsprite.rect.bottomright
 
     timer = 0
 
@@ -238,7 +413,7 @@ def main():
         dt = clock.tick(60)
 
         timer += dt
-        if timer >= 500:
+        if timer >= delaysprite.delay:
             timer = 0
             image = next(images)
 
@@ -248,20 +423,26 @@ def main():
             elif event.type == pg.KEYDOWN:
                 if event.key == pg.K_ESCAPE:
                     pg.event.post(pg.event.Event(pg.QUIT))
-                elif event.key == pg.K_n:
-                    for i,clicksprite in enumerate(clicksprites):
-                        if clicksprite is active:
-                            # shift+n for backwards
-                            x = -1 if event.unicode == 'N' else 1
-                            active = clicksprites[(i + x) % len(clicksprites)]
-                            images = d[active.name]
+                elif event.key in (pg.K_UP, pg.K_DOWN):
+                    for i,datasprite in enumerate(datasprites):
+                        if datasprite is active:
+                            x = -1 if event.key == pg.K_UP else 1
+                            active = datasprites[(i + x) % len(datasprites)]
+                            images = anims[active.name]
                             break
+                elif event.key in (pg.K_a, pg.K_z):
+                    delaysprite.delay += 10 if event.key == pg.K_a else -10
+                    if delaysprite.delay < 0:
+                        delaysprite.delay = 0
+                    elif delaysprite.delay > 1000:
+                        delaysprite.delay = 1000
+
             elif event.type == pg.MOUSEBUTTONDOWN:
                 if event.button == 1:
-                    for clicksprite in clicksprites:
-                        if clicksprite.rect.collidepoint(event.pos):
-                            images = d[clicksprite.name]
-                            active = clicksprite
+                    for datasprite in datasprites:
+                        if datasprite.rect.collidepoint(event.pos):
+                            images = anims[datasprite.name]
+                            active = datasprite
                             break
 
         screen.fill((0,0,0))
@@ -269,12 +450,12 @@ def main():
         rect.center = screen.get_rect().center
         screen.blit(image, rect)
 
-        for clicksprite in clicksprites:
-            if clicksprite is active:
-                pg.draw.rect(screen,(255,0,0),clicksprite.rect)
-            screen.blit(clicksprite.image, clicksprite.rect)
+        pg.draw.rect(screen,(255,0,0),active.rect.inflate(12,2))
+        for datasprite in datasprites:
+            screen.blit(datasprite.image, datasprite.rect)
 
         screen.blit(helpsprite.image, helpsprite.rect)
+        screen.blit(delaysprite.image, delaysprite.rect)
 
         pg.display.flip()
 
