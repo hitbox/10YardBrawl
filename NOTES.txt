@@ -8,7 +8,9 @@ Can't pause during defense button prompt
 Helmet face for jumping celebration?
 
 There's a stand up frame after tackling dive
-That weird up-scrummage sprite has solid pixels for a reason--so the down-scrummage sprite can sit right on top.
+
+That weird up-scrummage sprite has solid pixels for a reason--so the
+down-scrummage sprite can sit right on top.
 
 Animations/Spritesheet
 
@@ -22,3 +24,7 @@ Animations/Spritesheet
 
 BTW:
     Kinda liking always running from inside pdb
+
+2016-12-15
+    Broke the animation player fiddling with a better SelectSprite and all
+    that. Further fiddling moved to branch wip/borked-reorg.
